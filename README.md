@@ -90,15 +90,23 @@ python scripts/transcribe.py downloads/ -o transcripts
 长音频会自动用 ffmpeg 切分（多数云服务限制 ~25MB，90 分钟课程约 50MB）再合并。
 已完成的文件自动跳过；**目录里全转完时会秒退**，不会白加载 1.6G 模型。
 
-### ⚠️ HTTP 412 会发生在 yt-dlp 上，但公开 API 照常工作
+### ⚠️ HTTP 412 有两种完全不同的成因
 
-实测（2026-09-26）：同一个视频，`yt-dlp -f ba` 在**每个分P**上都报
-`HTTP Error 412: Precondition Failed`，而同一时刻 `x/web-interface/view`、`x/player/playurl`、
-`x/player/v2` **全部返回 code 0**。原因是 yt-dlp 的元数据取自**视频网页**端点，那个端点被风控。
+**第一种：yt-dlp 走的网页端点被风控。** 实测（2026-09-26）：同一个视频，
+`yt-dlp -f ba` 在每个分P 上都报 `HTTP Error 412: Precondition Failed`，
+而同一时刻 `x/web-interface/view`、`x/player/playurl`、`x/player/v2` **全部返回 code 0**。
+原因是 yt-dlp 的元数据取自**视频网页**端点。
 
-所以**下载和取字幕默认走 `scripts/bili_fetch.py`**（直连公开接口，公开视频不需要 cookie），
-yt-dlp 留作备选。如果 `bili_fetch.py` 也开始报 412，那是 IP 被限流了：**等几分钟**，
-并把 `--delay` 调大。别急着上 cookie——cookie 解决不了限流，只会让你多一个凭据要保管。
+**第二种：Python 的 TLS 指纹被拒。** 同一个 URL、同样的请求头、同一时刻：
+`urllib` 412、`requests` 412、**`curl` 200**。这是 WAF 按 TLS 指纹区分客户端，
+不是限流——**cookie 登录对它毫无帮助**。
+
+所以下载和取字幕默认走 `scripts/bili_fetch.py`：它直连公开接口（公开视频不需要 cookie），
+并且**遇到 412 会自动改用 curl 重试**（curl 在 Windows 10+ 和主流 Linux/macOS 上都自带）。
+`yt-dlp` 留作备选。
+
+如果连 curl 也开始 412，那才是真的 IP 限流：等几分钟，并把 `--delay` 调大到 2–3 秒。
+大量下载用 `--workers 4` 并发（API 请求保持串行，只有 CDN 下载并行）。
 
 > ⚠️ **实测提醒**：不要假设课程有字幕。本项目的示例课程（量子力学王可嘉）**一个字幕都没有**，
 > 连 B 站 AI 字幕都没有——所以本地转写是主力路径，不是备胎。
