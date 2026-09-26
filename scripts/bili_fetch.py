@@ -6,9 +6,9 @@ anti-bot returns HTTP 412 there while the JSON API keeps working (reproduced on
 2026-09-26: `yt-dlp -f ba` -> 412 on every part, `x/web-interface/view` -> code 0).
 So this is the fallback for that case, and it needs no cookies for public videos.
 
-    python bili_fetch.py list  BV1sUqJYaEpr                 # what parts exist
-    python bili_fetch.py audio BV1sUqJYaEpr -I 4-24         # download audio only
-    python bili_fetch.py subs  BV1sUqJYaEpr -I 1-3          # turn subtitles into transcripts
+    python bili_fetch.py list  BV1xxxxxxxxx                 # what parts exist
+    python bili_fetch.py audio BV1xxxxxxxxx -I 4-24         # download audio only
+    python bili_fetch.py subs  BV1xxxxxxxxx -I 1-3          # turn subtitles into transcripts
 
 Tier 1 of the subtitle/ASR ladder (`subs`) and the download step both live here.
 `transcribe.py` then handles the audio -> text tiers.
