@@ -149,7 +149,7 @@ def cmd_audio(args) -> int:
     # Resolve stream URLs one request at a time (the API is what gets rate-limited), then
     # download them concurrently -- the media CDN is happy to serve several files at once
     # and it is the slow part (~120 KB/s per connection here).
-    jobs: list[tuple[Path, str, int, dict]] = []
+    jobs: list[tuple[Path, list[str], int, dict]] = []
     for i, page in enumerate(picked, 1):
         target = outdir / f"{stem_for(course, page)}.m4a"
         if target.exists() and target.stat().st_size > 0 and not args.force:
@@ -160,12 +160,13 @@ def cmd_audio(args) -> int:
         play = api("/x/player/playurl",
                    {"bvid": bv, "cid": page["cid"], "fnval": 16, "fourk": 1}, args.cookie)
         try:
-            url, want = expected_bytes(play, page["duration"])
+            urls, want = expected_bytes(play, page["duration"])
         except LookupError:
             print(f"  [warn] {page['page']:>2} no audio stream returned, skipping", file=sys.stderr)
             continue
-        jobs.append((target, url, want, page))
-        print(f"  queued {page['page']:>2} {page['part']}  ({page['duration'] // 60}m, ~{want / 1e6:.0f}MB)")
+        jobs.append((target, urls, want, page))
+        print(f"  queued {page['page']:>2} {page['part']}  ({page['duration'] // 60}m, ~{want / 1e6:.0f}MB, "
+              f"{len(urls)} CDN host(s))")
     if not jobs:
         print("[info] nothing to download")
         return 0
@@ -173,8 +174,8 @@ def cmd_audio(args) -> int:
     print(f"\ndownloading {len(jobs)} file(s) with {args.workers} worker(s)")
     failures: list[tuple[Path, dict]] = []
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
-        futures = {pool.submit(download, url, target, args.cookie, want): (target, page)
-                   for target, url, want, page in jobs}
+        futures = {pool.submit(download, urls, target, args.cookie, want): (target, page)
+                   for target, urls, want, page in jobs}
         for fut in as_completed(futures):
             target, page = futures[fut]
             try:
@@ -184,8 +185,7 @@ def cmd_audio(args) -> int:
                 failures.append((target, page))
                 print(f"  FAIL {target.name}: {e}", file=sys.stderr)
 
-    # Stream URLs are time-limited, so a URL resolved minutes ago can come back 503. Give
-    # each failure one more chance against a freshly resolved URL before giving up.
+    # Stream URLs expire, so a fresh resolve can hand back a different, healthy node.
     if failures:
         print(f"\n[retry] {len(failures)} failed -- re-resolving stream URLs and trying again")
         retry_failures: list[tuple[Path, dict]] = []
@@ -193,9 +193,9 @@ def cmd_audio(args) -> int:
             if i > 1 and args.delay:
                 time.sleep(args.delay)
             play = api("/x/player/playurl", {"bvid": bv, "cid": page["cid"], "fnval": 16, "fourk": 1}, args.cookie)
-            url, want = expected_bytes(play, page["duration"])
+            urls, want = expected_bytes(play, page["duration"])
             try:
-                download(url, target, args.cookie, want)
+                download(urls, target, args.cookie, want)
                 print(f"  ok   {target.name} ({target.stat().st_size / 1e6:.1f} MB)")
             except Exception as e:
                 retry_failures.append((target, page))
@@ -210,12 +210,16 @@ def cmd_audio(args) -> int:
 
 
 def cmd_verify(args) -> int:
-    """Check local downloads against the size the API implies. Truncated files look fine
-    to ffprobe, so this byte comparison is the only cheap way to catch a bad download."""
+    """Check local downloads. Decoding is the only trustworthy test: a corrupt DASH file
+    still declares its full duration, and a parallel download produced 12 files of roughly
+    the right size that ffmpeg could not decode."""
     bv = parse_bv(args.url)
     course, pages = fetch_pages(bv, args.cookie)
     picked = parse_range(args.items, pages)
     outdir = Path(args.outdir)
+    if not shutil.which("ffmpeg"):
+        print("[warn] ffmpeg not found -- falling back to a size check, which cannot detect\n"
+              "       corruption inside a complete-looking file", file=sys.stderr)
     bad = []
     for i, page in enumerate(picked, 1):
         f = next(iter(outdir.glob(f"p{page['page']:02d}_*.m4a")), None)
@@ -232,76 +236,100 @@ def cmd_verify(args) -> int:
             want = 0
         got = f.stat().st_size
         ratio = got / want if want else 1.0
-        flag = "OK" if ratio > 0.95 else "BAD"
-        if flag == "BAD":
+        errors = decode_errors(f)
+        ok = ratio > 0.95 and errors == 0
+        if not ok:
             bad.append(page["page"])
-        print(f"p{page['page']:02d}  expected {want / 1e6:6.1f} MB  got {got / 1e6:6.1f} MB  "
-              f"ratio {ratio:.2f}  {flag}")
+        print(f"p{page['page']:02d}  size {got / 1e6:6.1f}/{want / 1e6:6.1f} MB  ratio {ratio:.2f}  "
+              f"decode errors {errors:>4}  {'OK' if ok else 'BAD'}")
     if bad:
-        print(f"\n[bad] {len(bad)} file(s) look truncated: {bad}\n"
-              f"      delete them and re-run `audio` (it will also resume from .part files)")
+        print(f"\n[bad] {len(bad)} file(s) unusable: {bad}\n"
+              f"      delete them and re-run `audio` (sequential, verified)")
         return 1
-    print(f"\n[ok] all {len(picked)} file(s) look complete")
+    print(f"\n[ok] all {len(picked)} file(s) decode cleanly")
     return 0
 
 
-def download(url: str, target: Path, cookie: str | None, expected_bytes: int = 0, retries: int = 4) -> None:
-    """Fetch one stream, resuming across attempts and refusing to accept a short file.
+def decode_errors(path: Path) -> int:
+    """Count ffmpeg's decode complaints. Returns 0 when ffmpeg is unavailable."""
+    if not shutil.which("ffmpeg"):
+        return 0
+    r = subprocess.run(["ffmpeg", "-v", "error", "-i", str(path), "-f", "null", "-"],
+                       capture_output=True, text=True)
+    return len([line for line in r.stderr.splitlines() if line.strip()])
 
-    The CDN does close connections early, and for fragmented DASH audio ffprobe still
-    reports the full declared duration from the init segment -- so a truncated file looks
-    complete. The only trustworthy check is the byte count, which we can predict from the
-    stream's declared bandwidth, so a short read is treated as a failure and retried
-    (resuming from wherever the .part got to).
+
+def download(urls: list[str], target: Path, cookie: str | None, expected_bytes: int = 0,
+             retries: int = 2, verify: bool = True) -> None:
+    """Fetch one stream, trying every CDN host the API offered until one delivers it.
+
+    Rules learned the hard way against bilibili's CDN (2026-09-26):
+
+    * **Never resume by appending.** Fragmented DASH audio reassembled from a byte range
+      still declares its full duration in the init segment, so a corrupt join *looks*
+      complete -- ffprobe happily reports the whole length. Restart the file instead.
+    * **Never trust the byte count.** Parallel downloads produced files of the correct
+      size whose AAC frames were corrupt: 12 of 21 files failed to decode, one of them
+      98.3% of the expected size. Sequential downloads of the same parts were clean, so
+      the default is one connection at a time, and every file gets decoded before it is
+      accepted.
+    * **A bad CDN node truncates at a fixed offset.** Two parts failed at the same byte
+      count on every retry of the same URL -- so retrying the URL is useless. The API
+      returns `backupUrl` hosts for exactly this reason; each one gets a turn.
     """
     headers = {"User-Agent": UA, "Referer": REFERER}
     if cookie:
         headers["Cookie"] = cookie
     part = target.with_suffix(target.suffix + ".part")
-    for attempt in range(1, retries + 1):
-        have = part.stat().st_size if part.exists() else 0
-        try:
-            h = dict(headers)
-            if have:
-                h["Range"] = f"bytes={have}-"
-            with urllib.request.urlopen(urllib.request.Request(url, headers=h), timeout=60) as r:
-                length = int(r.headers.get("Content-Length") or 0)
-                mode = "ab" if r.status == 206 else "wb"
-                if mode == "wb":
-                    have = 0
-                done = have
-                total = length + have
-                with part.open(mode) as fh:
-                    while chunk := r.read(1 << 20):
-                        fh.write(chunk)
-                        done += len(chunk)
-                        if total:
-                            print(f"\r   {target.stem[:14]} {done / 1e6:6.1f}/{total / 1e6:.1f} MB", end="", flush=True)
-            got = part.stat().st_size
-            want = max(expected_bytes, total)
-            if want and got < want * 0.98:
-                raise IOError(f"short read: {got / 1e6:.1f} of {want / 1e6:.1f} MB")
-            part.replace(target)
-            return
-        except Exception as e:
-            if attempt == retries:
-                raise SystemExit(f"download incomplete after {retries} attempts ({e}); "
-                                 f"partial kept at {part.name}")
-            print(f"\n   [warn] {target.stem[:14]}: {e}; resuming", file=sys.stderr)
-            time.sleep(2**attempt)
+    failures = []
+    for host, url in enumerate(urls, 1):
+        for attempt in range(1, retries + 1):
+            part.unlink(missing_ok=True)
+            try:
+                with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=60) as r:
+                    total = int(r.headers.get("Content-Length") or 0)
+                    done = 0
+                    with part.open("wb") as fh:
+                        while chunk := r.read(1 << 20):
+                            fh.write(chunk)
+                            done += len(chunk)
+                            if total:
+                                print(f"\r   {target.stem[:12]} host{host} "
+                                      f"{done / 1e6:6.1f}/{total / 1e6:.1f} MB", end="", flush=True)
+                want = max(expected_bytes, total)
+                if want and done < want * 0.98:
+                    raise IOError(f"short: {done / 1e6:.1f} of {want / 1e6:.1f} MB")
+                if verify:
+                    errors = decode_errors(part)
+                    if errors:
+                        raise IOError(f"corrupt: {errors} decode error(s)")
+                part.replace(target)
+                return
+            except Exception as e:
+                failures.append(f"host{host}: {e}")
+                if attempt < retries:
+                    print(f"\n   [warn] {target.stem[:12]} host{host}: {e}; retrying", file=sys.stderr)
+                    time.sleep(2)
+    part.unlink(missing_ok=True)
+    raise SystemExit(f"all {len(urls)} CDN host(s) failed ({'; '.join(failures[:3])})")
 
 
-def expected_bytes(play: dict, duration: int) -> tuple[str, int]:
-    """Pick the best audio stream and predict its size from the declared bandwidth."""
+def expected_bytes(play: dict, duration: int) -> tuple[list[str], int]:
+    """Pick the best audio stream and predict its size from the declared bandwidth.
+
+    Returns every CDN host the API offered (primary first) so a truncated node can be
+    swapped out.
+    """
     streams = (play.get("dash") or {}).get("audio") or []
     if streams:
         streams.sort(key=lambda s: (s.get("id") != BEST_AUDIO, -s.get("bandwidth", 0)))
         best = streams[0]
-        return best["baseUrl"], int(best.get("bandwidth", 0) / 8 * duration)
+        urls = [best["baseUrl"], *(best.get("backupUrl") or [])]
+        return urls, int(best.get("bandwidth", 0) / 8 * duration)
     durl = play.get("durl") or []  # some videos only expose a durl (mp4/flv) fallback
     if not durl:
         raise LookupError("no audio stream returned")
-    return durl[0]["url"], 0
+    return [durl[0]["url"], *(durl[0].get("backup_url") or [])], 0
 
 
 def cmd_subs(args) -> int:
@@ -362,8 +390,10 @@ def main() -> int:
         p.add_argument("--delay", type=float, default=1.0,
                        help="seconds between API requests (default: 1; raise it if you start getting HTTP 412)")
         if name == "audio":
-            p.add_argument("--workers", type=int, default=4,
-                           help="parallel CDN downloads (default: 4; the API stays serial)")
+            p.add_argument("--workers", type=int, default=1,
+                           help="parallel CDN downloads (default: 1). Higher values corrupted "
+                                "the audio in testing -- bilibili's CDN returns bad frames when "
+                                "pulled concurrently, and the file size still looks right.")
         if name != "list":
             p.add_argument("-I", "--items", default="all", help="parts to fetch, e.g. 4-24 or 1,3,5 (default: all)")
             p.add_argument("-o", "--outdir", default="transcripts" if name == "subs" else "downloads")

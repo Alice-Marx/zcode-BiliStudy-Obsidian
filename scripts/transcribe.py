@@ -245,7 +245,9 @@ def run_glossary(args) -> int:
         detail = ", ".join(f"{p}×{n}" for p, n in sorted(hits, key=lambda x: -x[1]))
         # A term replaced far more often than its share of the text usually means the
         # pattern is matching inside longer words -- report it instead of hiding it.
-        loud = [p for p, n in hits if n > 50]
+        # The bar is high on purpose: some entries are legitimately frequent (ψ alone
+        # appears hundreds of times in a lecture), so only outliers are worth flagging.
+        loud = [p for p, n in hits if n > 200]
         print(f"{f.name}: {sum(n for _, n in hits)} hit(s){' -- ' + detail if detail else ''}")
         if loud:
             print(f"  [warn] suspiciously frequent, check these patterns: {', '.join(loud)}", file=sys.stderr)
