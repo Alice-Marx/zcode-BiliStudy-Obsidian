@@ -1,0 +1,22 @@
+{
+  "name": "bilibili-persona",
+  "plugins": [
+    {
+      "name": "bilibili-persona",
+      "source": "./",
+      "version": "0.1.0",
+      "description": "Turn a bilibili course series into a reusable teacher-persona skill: pick the parts, transcribe them locally, distill the lecturer's style and knowledge into a skill you can ask questions.",
+      "description_i18n": {
+        "zh-CN": "把 B 站网课系列蒸馏成讲师人格 skill：选分P、本地转写、提炼讲课风格与知识体系，做成可以直接提问的老师。"
+      },
+      "displayName": "Bilibili Teacher Persona",
+      "displayName_i18n": {
+        "zh-CN": "B站网课讲师人格"
+      },
+      "category": "productivity",
+      "keywords": ["bilibili", "course", "lecture", "persona", "whisper", "transcript"],
+      "license": "GPL-3.0"
+    }
+  ],
+  "version": "0.1.0"
+}
