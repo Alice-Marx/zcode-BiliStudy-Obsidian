@@ -1,12 +1,12 @@
 {
   "name": "bilibili-persona",
-  "version": "0.1.0",
-  "description": "Turn a bilibili course series into a reusable teacher-persona skill: pick the parts, transcribe them locally, distill the lecturer's style and knowledge into a skill you can ask questions.",
+  "version": "0.2.0",
+  "description": "Turn a bilibili course into a knowledge base, an optional teacher persona, and (auto mode) an ingestion into the user's Obsidian LLM Wiki vault.",
   "author": {
     "name": "bilibili-persona contributors"
   },
   "license": "GPL-3.0",
-  "repository": "https://github.com/sorrowKnight123/video-to-skill-",
+  "repository": "https://github.com/Alice-Marx/zcode-BiliStudy-Obsidian",
   "skills": "skills",
   "commands": "commands"
 }

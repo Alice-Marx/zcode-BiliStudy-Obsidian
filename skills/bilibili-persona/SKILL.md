@@ -1,24 +1,51 @@
 ---
 name: bilibili-persona
-description: Turn a bilibili/B站 course video or BV id into a course knowledge base plus an optional teacher persona skill. Use when the user gives a BV id / bilibili link for a course, lecture series or 网课 and wants to learn from it, summarize it into notes, build a 知识库, or 蒸馏 the teacher into a persona skill. Also handles course materials (课件/讲义/PDF/PPT) sitting in the workspace.
-when_to_use: BV号, bilibili.com/video, 网课, 课程, 分P, 系列讲座, 把这个老师做成skill, 模仿这个老师讲课, 课件, 讲义, 学习资料
+description: Turn a bilibili/B站 course video or BV id into a course knowledge base, an optional teacher persona skill, and (in auto mode) an ingestion into the user's Obsidian LLM Wiki vault. Use when the user gives a BV id / bilibili link for a course, lecture series or 网课 and wants to learn from it, summarize it into notes, build a 知识库, 蒸馏 the teacher into a persona skill, or 自动学习并沉淀进 Obsidian/wiki. Also handles course materials (课件/讲义/PDF/PPT) sitting in the workspace.
+when_to_use: BV号, bilibili.com/video, 网课, 课程, 分P, 系列讲座, 把这个老师做成skill, 模仿这个老师讲课, 课件, 讲义, 学习资料, 学这个视频, 学习这个视频, B站学习, 自动学习, 沉淀进wiki, 写入Obsidian, obsidian, 知识库
 license: GPL-3.0
 ---
 
-# B 站网课 → 知识库 + 讲师人格
+# B 站网课 → 知识库 + 讲师人格 + Obsidian wiki
 
-把一门 B 站课程变成**两样分开的东西**，因为需求本来就分两种：
+把一门 B 站课程变成**三样分开的东西**，因为需求本来就分三种：
 
 | 产物 | 给谁用 | 默认 |
 |---|---|---|
 | **知识库** `skills/<课程名>/` | 只想学这门课知识的人 | 生成并**默认启用** |
 | **讲师人格** `personas/<讲师名>/` | 要按这个老师的口吻讲/答/复习的人 | 生成但**默认不启用** |
+| **Obsidian wiki 落库** `<vault>/raw/ + <vault>/wiki/` | 要知识长期复利、跨课程互链的人 | **自动学习模式必做**；交互模式用户点名才做 |
 
-分开的原因：多数人只需要知识；需要"老师"的人自己开。`personas/` 不是 skills 目录，
-宿主不会自动加载它——用户想用就拷进 `skills/`（SKILL.md 末尾给命令）。
+分开的原因：多数人只需要知识；需要"老师"的人自己开；wiki 落库只服务配置了 vault 的用户。
+`personas/` 不是 skills 目录，宿主不会自动加载它——用户想用就拷进 `skills/`（SKILL.md 末尾给命令）。
 
 **角色分工**：yt-dlp 负责下载，`scripts/transcribe.py` 负责把音频变文字，
-`scripts/materials.py` 负责读课件，**蒸馏和写作是 LLM（你）的活**，没有别的运行时。
+`scripts/materials.py` 负责读课件，`scripts/vault_sync.py` 负责 vault 落库的机械部分，
+**蒸馏、写作和 wiki 页面是 LLM（你）的活**，没有别的运行时。
+
+## 自动学习模式（auto）
+
+**触发**：用户说「自动学习」「直接学」「学完写进 Obsidian/wiki」，或请求来自其他 agent 的
+无头交接——总之**用户不打算在中途做决定**时进这个模式。
+
+**与交互模式的差别**（其余阶段完全一致）：
+
+| 交互模式停下来的地方 | 自动模式怎么做 |
+|---|---|
+| 阶段 1 问「全部还是指定分P」 | 不问。总时长 ≤ 90 分钟 → 全部；超出 → 取**前 90 分钟量**的分P，其余在交付报告里列明「未读」并给续读命令 |
+| 阶段 2b 云 ASR 要确认上传 | **唯一硬停**：无字幕且本机没有 faster-whisper 时，停下来问「要上传云 ASR 吗」。**永远不静默上传音频** |
+| 阶段 5 问要不要人格 | 跳过人格（auto 的目标是知识不是表演），报告里说明没做 |
+| 阶段 7 交报告 | 照做，另附 wiki 落库清单（阶段 8 产出） |
+
+**无头交接**（任何 agent 收到 B 站学习链接都可以这样转给 ZCode）：
+
+```bash
+node "D:\Program Files\ZCode\resources\glm\zcode.cjs" -p \
+  "自动学习模式：用 bilibili-persona skill 学习 <链接>，知识落进 Obsidian wiki，完成后跑 lint 并汇报" \
+  --cwd "E:\video-learning" --mode yolo
+```
+
+`--cwd` 是**工作区**（downloads/transcripts/skills 产物的家），不是 vault；vault 由
+`OBSIDIAN_VAULT` 环境变量或 `vault_sync.py --vault` 指定。模型 429 限流就等几分钟重试。
 
 ## 阶段 0 · 环境自检（只报告，不擅自安装）
 
@@ -51,6 +78,8 @@ python "<插件根>/scripts/bili_fetch.py" list <BV号或链接>
 - 转写本地免费，但**蒸馏要烧 token，成本随时长线性增长**。
 - 换算：1 小时中文讲课 ≈ 1.2–1.5 万字 ≈ 1 万 token 量级。**超过 5 小时就要分层做**。
 - 建议先跑 2–3 个分P 看质量，再决定全量。
+
+> 自动学习模式不停在这里：按本模式开头的 90 分钟规则自己定范围，把选择和理由写进交付报告。
 
 ### ⚠️ HTTP 412 是常态，先知道怎么应对
 
@@ -277,6 +306,51 @@ personas/<讲师名>/
 
 **最后必须停下来把结论告诉用户**：覆盖了什么、缺什么、哪里的置信度低、token 花了多少。
 
+## 阶段 8 · Obsidian wiki 落库（自动学习模式必做）
+
+把蒸馏成果写进用户的 LLM Wiki，让知识**跨课程互链、持续复利**，而不是躺在一次性讲义里。
+vault 由 `OBSIDIAN_VAULT` 环境变量或 `--vault` 参数指定（脚本内置一个默认值）。
+
+**先立规矩再动手**：
+
+- **先读 `<vault>/AGENTS.md`（wiki 宪法）**——页面规范、双链写法、冲突处理都以它为准，
+  本阶段只讲流程。与宪法冲突时以宪法为准。
+- **边界**：只写 `<vault>/raw/bilibili/` 与 `<vault>/wiki/`，vault 里其他一切不碰。
+- **raw 不可变**：转录只写入一次，之后绝不修改——这由 `vault_sync.py` 代码保证（已存在就跳过）。
+- **查重先行**：先 `vault_sync.py mention --bv <BV号>`，wiki 里已有这个 BV 就先读现有页面，
+  走「补强/更新」而不是重写。
+
+### 8a. 原始文字进 raw（脚本做）
+
+```bash
+python "<插件根>/scripts/vault_sync.py" raw --bv <BV号> \
+  --from transcripts/ --title "<视频标题>" --url "<链接>" --parts "1-5"
+```
+
+### 8b. 写 wiki 页面（LLM 做，一次改全不欠账）
+
+1. **source 摘要页** `wiki/sources/bilibili-<BV号>.md`：frontmatter（title/type/created/
+   updated/sources/tags）+ 视频信息（标题、UP主、链接、总时长、读了哪些分P）+ 核心论点 +
+   关键知识点 + 值得记住的原话。事实性论断句末标 `（来源：[[sources/bilibili-<BV号>]]）`。
+2. **concepts / entities**：讲义里的每个重要概念建或更新 `wiki/concepts/` 页；讲师、
+   机构等实体建 `wiki/entities/` 页。更新已有页面时**不静默覆盖旧结论**，冲突用
+   `> [!warning] 冲突` 并列两说及来源。
+3. **index.md**：把新页面按类别编入目录，每条「链接 + 一句话摘要」。
+4. **overview.md**：只有主线脉络变了才改；拿不准就不动。
+5. **log.md**（脚本做）：
+
+```bash
+python "<插件根>/scripts/vault_sync.py" log --title "<视频标题>" \
+  --note "<一段话：读了什么、产出哪些页面、有什么要点>"
+```
+
+6. **自检**：`cd <vault>/wiki && python _lint.py`——断链必须清零才能交付。
+
+### 8c. 交付时告诉用户
+
+wiki 新增/更新了哪些页面（给 Obsidian 双链路径）、raw 存了什么、lint 结果、
+以及「在 Obsidian 里打开 graph view 能看到本次新增的链接」。
+
 ## 不要做的事
 
 - 不读视频画面（抽帧/OCR/视觉模型）：v1 明确不做，用课件补。用户主动要求再单独讨论。
@@ -287,6 +361,9 @@ personas/<讲师名>/
 - 不绕付费墙：付费课程需要用户自己已购买并登录，不碰 DRM、不批量爬取。
 - 不重新分发原视频/音频/字幕/课件文件。
 - 不静默安装依赖、不静默上传文件、不静默改用户浏览器或系统配置。
+- **vault 只碰 raw/bilibili/ 和 wiki/**：不写 vault 其他位置、不改 raw 已有文件、
+  不动用户的既有笔记目录。没配置 vault（`OBSIDIAN_VAULT`/`--vault` 都没有且内置路径无效）
+  就跳过阶段 8 并在报告里说明。
 
 ## 启用讲师人格（给用户的命令）
 
